@@ -6,7 +6,7 @@ import hashlib
 import base64
 from decimal import Decimal
 
-from django.db import models
+from django.db import models, connection
 from django.contrib.sites.models import Site
 from django.contrib.auth.models import User
 
@@ -284,10 +284,21 @@ def new_bitcoin_address():
                 print "refilling queue...", bp
             else:
                 bp = bp[0]
-                updated = BitcoinAddress.objects.select_for_update().filter(Q(id=bp.id) & Q(active=False) & Q(wallet__isnull=True) & \
-                    Q(least_received__lte=0)).update(active=True)
-                db_transaction.commit()
-                if updated:
+
+                sql = """
+                    UPDATE "django_bitcoin_bitcoinaddress"
+                        SET "active" = true
+                    WHERE "django_bitcoin_bitcoinaddress"."id" IN (
+                        SELECT U0."id" FROM "django_bitcoin_bitcoinaddress" U0
+                        WHERE (U0."id" = %s  AND U0."active" = false  AND U0."wallet_id" IS NULL AND U0."least_received" <= 0 )
+                        FOR UPDATE)
+                """
+
+                cursor = connection.cursor()
+                cursor.execute(sql, [bp.id])
+                updated = cursor.rowcount
+
+                if updated and updated != -1:
                     return bp
                 else:
                     print "wallet transaction concurrency:", bp.address
@@ -543,8 +554,22 @@ class Wallet(models.Model):
             if usable_addresses.count():
                 return usable_addresses[0].address
             addr = new_bitcoin_address()
-            updated = BitcoinAddress.objects.select_for_update().filter(Q(id=addr.id) & Q(active=True) & Q(least_received__lte=0) & Q(wallet__isnull=True))\
-                          .update(active=True, wallet=self)
+
+            sql = """
+                UPDATE "django_bitcoin_bitcoinaddress"
+                    SET "active" = true,
+                        "wallet_id" = %s
+                WHERE "django_bitcoin_bitcoinaddress"."id" IN (
+                    SELECT U0."id" FROM "django_bitcoin_bitcoinaddress" U0
+                    WHERE (U0."id" = %s  AND U0."active" = true  AND U0."wallet_id" IS NULL AND U0."least_received" <= 0 )
+                    FOR UPDATE)
+            """
+
+            cursor = connection.cursor()
+            cursor.execute(sql, [self.id, addr.id])
+
+            updated = cursor.rowcount
+
             print "addr_id", addr.id, updated
             # db_transaction.commit()
             if updated:
